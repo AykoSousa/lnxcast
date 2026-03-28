@@ -1,0 +1,61 @@
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "net",
+    "capture",
+    "media",
+    "server"
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Ayko Nascimento"]
+license     = "MIT"
+
+[workspace.dependencies]
+tokio             = { version = "1", features = ["full"] }
+tokio-stream      = { version = "0.1" }
+thiserror         = "2"
+anyhow            = "1"
+tracing           = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde             = { version = "1", features = ["derive"] }
+serde_json        = "1"
+zbus              = { version = "5", features = ["tokio"] }
+ashpd             = { version = "0.10", features = ["tokio"] }
+gstreamer             = { version = "0.23", features = ["v1_20"] }
+gstreamer-app         = { version = "0.23" }
+gstreamer-rtsp        = { version = "0.23" }
+gstreamer-rtsp-server = { version = "0.23" }
+gstreamer-video       = { version = "0.23" }
+net     = { path = "net" }
+capture = { path = "capture" }
+media   = { path = "media" }
+server  = { path = "server" }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Root binary crate
+# ──────────────────────────────────────────────────────────────────────────────
+[package]
+name        = "lnxcast"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+description = "Miracast/RTSP streaming tool for Linux"
+ 
+[[bin]]
+name = "lnxcast"
+path = "src/main.rs"
+ 
+[dependencies]
+tokio              = { workspace = true }
+anyhow             = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+net        = { workspace = true }
+capture    = { workspace = true }
+media      = { workspace = true }
+server     = { workspace = true }
