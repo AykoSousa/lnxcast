@@ -1,0 +1,16 @@
+[package]
+name        = "capture"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+description = "Screen capture via PipeWire / XDG Desktop Portal (Wayland)"
+
+[dependencies]
+tokio       = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+ashpd       = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
