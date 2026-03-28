@@ -1,0 +1,20 @@
+[package]
+name        = "server"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+description = "RTSP server (port 7236) serving the lnxcast GStreamer pipeline at /live"
+
+[dependencies]
+tokio                 = { workspace = true }
+thiserror             = { workspace = true }
+tracing               = { workspace = true }
+gstreamer             = { workspace = true }
+gstreamer-rtsp        = { workspace = true }
+gstreamer-rtsp-server = { workspace = true }
+glib                  = "0.20"
+media         = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
