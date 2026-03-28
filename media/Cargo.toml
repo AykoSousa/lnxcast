@@ -1,0 +1,19 @@
+[package]
+name        = "media"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+description = "GStreamer pipeline builder with VAAPI/x264 fallback for H.264 encoding"
+ 
+[dependencies]
+tokio       = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+gstreamer   = { workspace = true }
+gstreamer-app    = { workspace = true }
+gstreamer-video  = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+ 
