@@ -101,12 +101,15 @@ impl ServerConfig {
     pub fn effective_launch_pipeline(&self) -> String {
         self.launch_pipeline.clone().unwrap_or_else(|| {
             // NO capsfilters upstream of the encoder.
-            // Any caps constraint (format, width, height, framerate) placed
-            // upstream is back-propagated to pipewiresrc which then tries to
-            // satisfy it with the portal → "no more input formats".
-            // Safe: pipewiresrc (free) → videoconvert → videoscale → videorate
-            //       → x264enc → h264parse → caps(byte-stream) → rtph264pay
-            "( pipewiresrc                ! videoconvert                ! videoscale method=1                ! videorate max-rate=30 drop-only=true                ! x264enc tune=zerolatency speed-preset=ultrafast bitrate=4000                ! h264parse                ! video/x-h264,stream-format=byte-stream,alignment=au                ! rtph264pay name=pay0 pt=96 config-interval=1 )"
+            // videorate is NOT used: pipewiresrc buffers lack GST_BUFFER_DURATION
+            // which causes videorate to abort. x264enc handles VFR natively.
+            "( pipewiresrc \
+               ! videoconvert \
+               ! videoscale method=1 \
+               ! x264enc tune=zerolatency speed-preset=ultrafast bitrate=4000 \
+               ! h264parse \
+               ! video/x-h264,stream-format=byte-stream,alignment=au \
+               ! rtph264pay name=pay0 pt=96 config-interval=1 )"
                 .to_owned()
         })
     }
