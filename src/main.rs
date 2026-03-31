@@ -2,23 +2,28 @@
 //!
 //! Miracast / RTSP streaming daemon for Linux.
 //!
-//! Orchestrates the four sub-crates:
-//!  - `net`     – P2P device discovery
-//!  - `capture` – screen capture via PipeWire portal
-//!  - `media`   – GStreamer H.264 pipeline
-//!  - `lnxcast-server`  – RTSP server on port 7236
+//! ## Usage
 //!
-//! Usage:
-//!   lnxcast [--iface <wlan>] [--bitrate <kbps>] [--port <port>]
+//!   ./lnxcast                     # auto-detect P2P interface
+//!   LNXCAST_IFACE=p2p-dev-wlan0 ./lnxcast
+//!   RUST_LOG=debug ./lnxcast
+//!
+//! ## Do NOT run with sudo
+//!
+//! The XDG Desktop Portal (screen capture) runs inside your Wayland session
+//! as your normal user.  Running with `sudo` switches to a different D-Bus
+//! environment where the portal is not present.  Always run lnxcast as the
+//! desktop user.  wpa_supplicant is accessible via the system D-Bus without
+//! elevated privileges on all major distributions.
 
 use anyhow::{Context, Result};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
 use capture::{CaptureBackend, CaptureOptions, ScreenCapturer};
 use media::{MediaPipeline, PipelineConfig};
-use net::{DeviceEvent, DeviceScanner, WpaSupplicantScanner};
+use net::{DeviceEvent, DeviceScanner, NetError, WpaSupplicantScanner};
 use server::{RtspServer, ServerConfig};
 
 #[tokio::main]
@@ -33,20 +38,36 @@ async fn main() -> Result<()> {
 
     info!("lnxcast starting");
 
+    // ── Sudo guard ───────────────────────────────────────────────────────────
+    // Detect if running as root and warn loudly – the portal will not be
+    // available and the P2P scan does not need elevated privileges either.
+    if unsafe { libc::geteuid() } == 0 {
+        anyhow::bail!(
+            "lnxcast must NOT be run with sudo / as root.\n\
+             The XDG Desktop Portal for screen capture runs in your Wayland \
+             session as your normal user and is not accessible to root.\n\
+             wpa_supplicant is reachable via the system D-Bus without elevated \
+             privileges.  Run: ./lnxcast"
+        );
+    }
+
     // ── 1. Detect capture back-end ──────────────────────────────────────────
     let backend = CaptureBackend::detect().await;
     if !backend.is_available() {
         anyhow::bail!(
-            "No screen-capture back-end available. \
-             Ensure xdg-desktop-portal is running on a Wayland session."
+            "No screen-capture back-end available.\n\
+             Ensure xdg-desktop-portal (and a compositor-specific back-end \
+             such as xdg-desktop-portal-gnome or xdg-desktop-portal-wlr) \
+             is running inside your Wayland session.\n\
+             Hint: check with: systemctl --user status xdg-desktop-portal"
         );
     }
     info!("Capture backend: {backend:?}");
 
     // ── 2. Acquire PipeWire stream ───────────────────────────────────────────
     let capturer = ScreenCapturer::new(CaptureOptions::default());
-    // `stream` must stay alive until the pipeline is stopped: it owns the
-    // OwnedFd that keeps the PipeWire portal connection open.
+    // `stream` must stay alive for the whole pipeline lifetime – it owns the
+    // OwnedFd that keeps the portal PipeWire connection open.
     let stream = capturer
         .start()
         .await
@@ -58,7 +79,7 @@ async fn main() -> Result<()> {
 
     // ── 3. Build GStreamer pipeline ──────────────────────────────────────────
     let pipeline_cfg = PipelineConfig {
-        pipewire_fd: pw_fd,      // portal fd – required for node lookup
+        pipewire_fd: pw_fd,
         pipewire_node_id: node_id,
         bitrate_kbps: 4_000,
         framerate: 30,
@@ -72,30 +93,60 @@ async fn main() -> Result<()> {
     media_pipeline.play().context("Failed to start pipeline")?;
 
     // ── 4. Start P2P scanner in background ──────────────────────────────────
+    // Auto-detect the p2p-dev-* interface, or use LNXCAST_IFACE env var.
+    let p2p_iface = if let Ok(iface) = std::env::var("LNXCAST_IFACE") {
+        info!(iface = %iface, "Using P2P interface from LNXCAST_IFACE");
+        iface
+    } else {
+        match WpaSupplicantScanner::detect_p2p_interface().await {
+            Ok(iface) => iface,
+            Err(NetError::WpaNotRunning) => {
+                warn!(
+                    "wpa_supplicant is not running – P2P discovery disabled.\n\
+                     Start it with: sudo systemctl start wpa_supplicant"
+                );
+                // Continue without P2P scanning; RTSP still works.
+                run_server_only(stream, media_pipeline).await?;
+                return Ok(());
+            }
+            Err(NetError::NoP2pInterface { ref tried }) => {
+                warn!(
+                    ?tried,
+                    "No p2p-dev-* interface found in wpa_supplicant.\n\
+                     Enable P2P on your adapter:\n\
+                       sudo iw dev <wlan> interface add p2p-dev-<wlan> type __p2p_device\n\
+                     Or set LNXCAST_IFACE=p2p-dev-<wlan> manually."
+                );
+                run_server_only(stream, media_pipeline).await?;
+                return Ok(());
+            }
+            Err(e) => {
+                warn!("P2P interface detection failed: {e} – continuing without P2P");
+                run_server_only(stream, media_pipeline).await?;
+                return Ok(());
+            }
+        }
+    };
+
     let (event_tx, mut event_rx) = mpsc::channel::<DeviceEvent>(64);
-    let scanner = WpaSupplicantScanner::new("wlx0cc65541a4b7");
+    let scanner = WpaSupplicantScanner::new(p2p_iface);
 
     tokio::spawn(async move {
         if let Err(e) = scanner.scan(event_tx).await {
-            error!("P2P scanner error: {e}");
+            error!("P2P scanner stopped: {e}");
         }
     });
 
-    // Log discovered devices in background.
     tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
             match event {
-                DeviceEvent::Discovered(dev) => {
-                    info!(
-                        name  = %dev.device_name,
-                        addr  = %dev.device_addr,
-                        wfd   = dev.wfd_capable,
-                        "P2P sink discovered"
-                    );
-                }
-                DeviceEvent::Lost { object_path } => {
-                    info!(%object_path, "P2P sink lost");
-                }
+                DeviceEvent::Discovered(dev) => info!(
+                    name = %dev.device_name,
+                    addr = %dev.device_addr,
+                    wfd  = dev.wfd_capable,
+                    "P2P sink discovered"
+                ),
+                DeviceEvent::Lost { object_path } => info!(%object_path, "P2P sink lost"),
                 DeviceEvent::ScanComplete => info!("P2P scan sweep complete"),
                 DeviceEvent::Error(e) => error!("P2P error: {e}"),
             }
@@ -103,10 +154,18 @@ async fn main() -> Result<()> {
     });
 
     // ── 5. Launch RTSP server ────────────────────────────────────────────────
-    let server_cfg = ServerConfig::default(); // port 7236 / /live
+    run_server_only(stream, media_pipeline).await
+}
+
+/// Run only the RTSP server (no P2P scanning).
+/// `_stream` is kept alive here so the PipeWire fd is not closed.
+async fn run_server_only(
+    _stream: capture::CaptureStream,
+    media_pipeline: MediaPipeline,
+) -> Result<()> {
+    let server_cfg = ServerConfig::default(); // port 7236, /live
     let server = RtspServer::new(server_cfg).context("Failed to create RTSP server")?;
 
-    // Install Ctrl-C handler.
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
