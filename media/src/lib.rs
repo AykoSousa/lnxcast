@@ -231,11 +231,18 @@ impl MediaPipeline {
         let videoscale = Self::make("videoscale")?;
         videoscale.set_property_from_str("method", "bilinear"); // 1 = bilinear
 
-        // videorate: re-timestamps frames to the desired fps.
-        // Also has no capsfilter downstream for the same reason.
-        let videorate = Self::make("videorate")?;
-        videorate.set_property("max-rate", config.framerate as i32);
-        videorate.set_property_from_str("drop-only", "true");
+        // DO NOT use videorate here.
+        //
+        // videorate requires every input buffer to carry a valid GST_BUFFER_DURATION.
+        // The XDG portal / pipewiresrc does NOT guarantee duration on every buffer
+        // (it sets PTS but not duration), so videorate asserts and aborts:
+        //   "assertion failed: (GST_BUFFER_DURATION_IS_VALID(outbuf))"
+        //
+        // Frame-rate control for live Miracast streaming is not necessary:
+        //   • x264enc handles variable frame-rate input natively.
+        //   • The RTSP client negotiates the session framerate from SDP.
+        //   • If fps limiting is ever needed, use identity drop-probability
+        //     or a custom probe, never videorate on an unduration'd stream.
 
         // ── Encoder ─────────────────────────────────────────────────────────
         let enc: Element = match encoder {
@@ -280,13 +287,13 @@ impl MediaPipeline {
 
         // ── Add all elements ────────────────────────────────────────────────
         // Pipeline order (NO capsfilters upstream of the encoder):
-        //   pipewiresrc → videoconvert → videoscale → videorate → encoder
+        //   pipewiresrc → videoconvert → videoscale → encoder
         //   → h264parse → enc_caps_filter → rtph264pay → appsink
         //
         // enc_caps_filter (byte-stream) is the ONLY capsfilter; it is
         // downstream of the encoder so it cannot affect pipewiresrc negotiation.
         let elements = [
-            &src, &convert, &videoscale, &videorate,
+            &src, &convert, &videoscale,
             &enc, &h264parse, &enc_caps_filter, &rtppay, &appsink,
         ];
         pipeline
