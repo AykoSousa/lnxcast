@@ -93,47 +93,25 @@ async fn main() -> Result<()> {
     media_pipeline.play().context("Failed to start pipeline")?;
 
     // ── 4. Start P2P scanner in background ──────────────────────────────────
-    // Auto-detect the p2p-dev-* interface, or use LNXCAST_IFACE env var.
-    let p2p_iface = if let Ok(iface) = std::env::var("LNXCAST_IFACE") {
-        info!(iface = %iface, "Using P2P interface from LNXCAST_IFACE");
-        iface
+    // O scanner usa auto-detecção com fallback passivo — nunca bloqueia o
+    // startup mesmo que GetInterface falhe (ex: ambiente com NetworkManager).
+    let scanner = if let Ok(iface) = std::env::var("LNXCAST_IFACE") {
+        info!(iface = %iface, "Usando interface P2P de LNXCAST_IFACE");
+        WpaSupplicantScanner::new(iface)
     } else {
-        match WpaSupplicantScanner::detect_p2p_interface().await {
-            Ok(iface) => iface,
-            Err(NetError::WpaNotRunning) => {
-                warn!(
-                    "wpa_supplicant is not running – P2P discovery disabled.\n\
-                     Start it with: sudo systemctl start wpa_supplicant"
-                );
-                // Continue without P2P scanning; RTSP still works.
-                run_server_only(stream, media_pipeline).await?;
-                return Ok(());
-            }
-            Err(NetError::NoP2pInterface { ref tried }) => {
-                warn!(
-                    ?tried,
-                    "No p2p-dev-* interface found in wpa_supplicant.\n\
-                     Enable P2P on your adapter:\n\
-                       sudo iw dev <wlan> interface add p2p-dev-<wlan> type __p2p_device\n\
-                     Or set LNXCAST_IFACE=p2p-dev-<wlan> manually."
-                );
-                run_server_only(stream, media_pipeline).await?;
-                return Ok(());
-            }
-            Err(e) => {
-                warn!("P2P interface detection failed: {e} – continuing without P2P");
-                run_server_only(stream, media_pipeline).await?;
-                return Ok(());
-            }
-        }
+        WpaSupplicantScanner::auto()
     };
 
     let (event_tx, mut event_rx) = mpsc::channel::<DeviceEvent>(64);
-    let scanner = WpaSupplicantScanner::new(p2p_iface);
 
     tokio::spawn(async move {
         if let Err(e) = scanner.scan(event_tx).await {
-            error!("P2P scanner stopped: {e}");
+            match e {
+                NetError::WpaNotRunning => warn!(
+                    "wpa_supplicant não está rodando.                      Inicie com: sudo systemctl start wpa_supplicant"
+                ),
+                other => error!("Scanner P2P encerrado: {other}"),
+            }
         }
     });
 
@@ -144,11 +122,12 @@ async fn main() -> Result<()> {
                     name = %dev.device_name,
                     addr = %dev.device_addr,
                     wfd  = dev.wfd_capable,
-                    "P2P sink discovered"
+                    "Sink P2P descoberto"
                 ),
-                DeviceEvent::Lost { object_path } => info!(%object_path, "P2P sink lost"),
-                DeviceEvent::ScanComplete => info!("P2P scan sweep complete"),
-                DeviceEvent::Error(e) => error!("P2P error: {e}"),
+                DeviceEvent::Lost { object_path } => info!(%object_path, "Sink P2P perdido"),
+                DeviceEvent::ScanComplete        => info!("Sweep P2P completo"),
+                DeviceEvent::ScanMode(m)         => info!("Modo de scan: {m}"),
+                DeviceEvent::Error(e)            => error!("Erro P2P: {e}"),
             }
         }
     });
